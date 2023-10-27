@@ -10,7 +10,7 @@ export const register = async (req, res) => {
 		const { email } = req.body;
 
 		// Check if the email already exists in the database
-		const existingUser = await User.findOne({ email });
+		const existingUser = await User.findOne({ email }).maxTimeMS(5000); // Set a 5-second timeout
 
 		if (existingUser) {
 			return res.status(400).json({
