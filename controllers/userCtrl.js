@@ -1,109 +1,129 @@
 import { User } from "../models/userModel.js";
 import { sendMail } from "../utils/sendMail.js";
 import { sendToken } from "../utils/sendToken.js";
+import { generateOtp, verifyUser } from "../utils/sendOtp.js";
 import cloudinary from "cloudinary";
 import fs from "fs";
 
 export const register = async (req, res) => {
 	try {
-		const { name, email, password } = req.body;
+		const { email } = req.body;
 
-		const avatar = req.files.avatar.tempFilePath;
+		// Check if the email already exists in the database
+		const existingUser = await User.findOne({ email });
 
-		const user = await User.findOne({ email });
-
-		if (user) {
+		if (existingUser) {
 			return res.status(400).json({
 				success: false,
-				message: "User already exists",
+				message: "Email already exists. Please use a different email.",
 			});
 		}
 
-		const otp = Math.floor(Math.random() * 1000000);
+		// Generate a new OTP and OTP expiry
+		const otp = generateOtp();
+		const otpExpiry = new Date(Date.now() + 5 * 60 * 1000); // OTP expires in 5 minutes
 
-		const mycloud = await cloudinary.v2.uploader.upload(avatar);
-
-		fs.rmSync("./tmp", { recursive: true });
-
-		const newUser = await User.create({
-			name,
+		// Create a new user with the provided data and generated OTP
+		const newUser = new User({
 			email,
-			password,
-			avatar: {
-				public_id: mycloud.public_id,
-				url: mycloud.secure_url,
-			},
 			otp,
-			otp_expiry: Date.now() + process.env.OTP_EXPIRE * 60 * 1000,
+			otp_expiry: otpExpiry,
 		});
 
+		// Save the new user to the database
+		await newUser.save();
+
+		// Send the OTP to the user's email
 		await sendMail(email, "Verify your account", `Your OTP is ${otp}`);
-		sendToken(
-			res,
-			newUser,
-			200,
-			"OTP sent to your email, please verify your account"
-		);
-	} catch (error) {
-		res.status(500).json({
-			success: false,
-			message: error.message,
+
+		res.status(200).json({
+			success: true,
+			message: "OTP sent to your email for verification",
 		});
+	} catch (error) {
+		res.status(500).json({ success: false, message: error.message });
 	}
 };
 
-export const verify = async (req, res) => {
+export const sendOtpCtrl = async (req, res) => {
 	try {
-		const otp = Number(req.body.otp);
+		const { email } = req.body;
 
-		const user = await User.findById(req.user._id);
+		// Check if the email already exists in the database
+		const existingUser = await User.findOne({ email });
 
-		if (user.otp !== otp || user.otp_expiry < Date.now()) {
+		if (!existingUser) {
+			// User does not exist, so send an error response
 			return res.status(400).json({
 				success: false,
-				message: "Invalid OTP or has been Expired",
+				message: "Email does not exist. Please use a different email.",
 			});
 		}
 
-		user.verified = true;
-		user.otp = null;
-		user.otp_expiry = null;
+		// Generate a new OTP and OTP expiry
+		const otp = generateOtp();
+		const otpExpiry = new Date(Date.now() + 5 * 60 * 1000); // OTP expires in 5 minutes
 
-		await user.save();
+		// Send the OTP to the user's email
+		await sendMail(email, "Verify your account", `Your OTP is ${otp}`);
 
-		sendToken(res, user, 200, "Account Verified");
+		// Update the existing user with the new OTP and OTP expiry
+		existingUser.otp = otp;
+		existingUser.otp_expiry = otpExpiry;
+		await existingUser.save();
+
+		// Send a success response
+		res.status(200).json({
+			success: true,
+			message: "OTP sent to your email for verification",
+		});
 	} catch (error) {
+		// Handle any errors that occur during the process
 		res.status(500).json({ success: false, message: error.message });
 	}
 };
 
 export const login = async (req, res) => {
 	try {
-		const { email, password } = req.body;
+		const { email, otp } = req.body;
 
-		if (!email || !password) {
-			return res
-				.status(400)
-				.json({ success: false, message: "Please enter all fields" });
+		if (!email || !otp) {
+			return res.status(400).json({
+				success: false,
+				message: "Please provide both email and OTP",
+			});
 		}
 
-		const user = await User.findOne({ email }).select("+password");
+		const user = await User.findOne({ email });
 
 		if (!user) {
 			return res
-				.status(400)
-				.json({ success: false, message: "Invalid Email or Password" });
+				.status(404)
+				.json({ success: false, message: "User not found" });
 		}
 
-		const isMatch = await user.comparePassword(password);
+		const currentTimestamp = new Date().getTime();
+		if (user.otp_expiry < currentTimestamp) {
+			user.otp = null;
+			user.otp_expiry = null;
+			await user.save();
 
-		if (!isMatch) {
-			return res
-				.status(400)
-				.json({ success: false, message: "Invalid Email or Password" });
+			return res.status(400).json({
+				success: false,
+				message: "OTP has expired. Please request a new OTP.",
+			});
 		}
 
-		sendToken(res, user, 200, "Login Successful");
+		const verifiedUser = await verifyUser(user._id, otp);
+
+		if (!verifiedUser.success) {
+			return res.status(400).json({
+				success: false,
+				message: verifiedUser.message,
+			});
+		}
+
+		sendToken(res, verifiedUser.user, 200, "Login Successful");
 	} catch (error) {
 		res.status(500).json({ success: false, message: error.message });
 	}
@@ -111,87 +131,85 @@ export const login = async (req, res) => {
 
 export const logout = async (req, res) => {
 	try {
-		res.status(200)
-			.cookie("token", null, {
-				expires: new Date(Date.now()),
-			})
-			.json({ success: true, message: "Logged out successfully" });
-	} catch (error) {
-		res.status(500).json({ success: false, message: error.message });
-	}
-};
-
-export const getAllUser = async (req, res) => {
-	try {
-		const user = await User.find();
-		res.status(200).json({ success: true, user });
-	} catch (error) {
-		res.status(500).json({ success: false, message: error.message });
-	}
-};
-
-export const addTask = async (req, res) => {
-	try {
-		const { title, description } = req.body;
-
-		const user = await User.findById(req.user._id);
-
-		user.tasks.push({
-			title,
-			description,
-			completed: false,
-			createdAt: new Date(Date.now()),
-		});
-
-		await user.save();
-
+		res.clearCookie("token");
 		res.status(200).json({
 			success: true,
-			message: "Task added successfully",
+			message: "Logged out successfully",
 		});
 	} catch (error) {
 		res.status(500).json({ success: false, message: error.message });
 	}
 };
 
-export const removeTask = async (req, res) => {
+export const updateProfile = async (req, res) => {
 	try {
-		const { taskId } = req.params;
+		const userId = req.user._id;
+		const user = await User.findById(userId);
 
-		const user = await User.findById(req.user._id);
+		if (!user) {
+			return res.status(404).json({
+				success: false,
+				message: "User not found",
+			});
+		}
 
-		user.tasks = user.tasks.filter(
-			(task) => task._id.toString() !== taskId.toString()
+		const { name, email, number, addresses } = req.body;
+
+		if (name) user.name = name;
+		if (email) user.email = email;
+		if (number) user.number = number;
+
+		if (req.files && req.files.avatar) {
+			const avatar = req.files.avatar.tempFilePath;
+			const mycloud = await cloudinary.v2.uploader.upload(avatar);
+			fs.rmSync("./tmp", { recursive: true });
+			user.avatar = {
+				public_id: mycloud.public_id,
+				url: mycloud.secure_url,
+			};
+		}
+
+		const parsedAddresses =
+			typeof addresses === "string" ? JSON.parse(addresses) : addresses;
+
+		const existingAddressIndex = user.addresses.findIndex(
+			(address) => address._id.toString() === (parsedAddresses._id || "")
 		);
 
-		await user.save();
+		if (existingAddressIndex !== -1) {
+			// If an existing address is found, update it
+			const existingAddress = user.addresses[existingAddressIndex];
+			existingAddress.houseNumber = parsedAddresses.houseNumber;
+			existingAddress.street = parsedAddresses.street;
+			existingAddress.city = parsedAddresses.city;
+			existingAddress.state = parsedAddresses.state;
+			existingAddress.postalCode = parsedAddresses.postalCode;
+		} else {
+			// If no existing addresses, create a new one
+			user.addresses = parsedAddresses;
+		}
+
+		const savedUser = await user.save();
+
+		const userData = {
+			_id: savedUser._id,
+			email: savedUser.email,
+			name: savedUser.name,
+			number: savedUser.number,
+			avatar: savedUser.avatar,
+			addresses: savedUser.addresses,
+			subUsers: savedUser.subUsers,
+			verified: savedUser.verified,
+			otp: savedUser.otp,
+			otp_expiry: savedUser.otp_expiry,
+			createdAt: savedUser.createdAt,
+			updatedAt: savedUser.updatedAt,
+		};
 
 		res.status(200).json({
 			success: true,
-			message: "Task removed successfully",
-		});
-	} catch (error) {
-		res.status(500).json({ success: false, message: error.message });
-	}
-};
-
-export const updateTask = async (req, res) => {
-	try {
-		const { taskId } = req.params;
-
-		const user = await User.findById(req.user._id);
-
-		user.task = user.tasks.find(
-			(task) => task._id.toString() === taskId.toString()
-		);
-
-		user.task.completed = !user.task.completed;
-
-		await user.save();
-
-		res.status(200).json({
-			success: true,
-			message: "Task Updated successfully",
+			message: "Profile Updated successfully",
+			user: userData,
 		});
 	} catch (error) {
 		res.status(500).json({ success: false, message: error.message });
@@ -200,141 +218,281 @@ export const updateTask = async (req, res) => {
 
 export const getMyProfile = async (req, res) => {
 	try {
-		if (!req.user) {
-			return res
-				.status(401)
-				.json({ success: false, message: "User not authenticated" });
-		}
 		const user = await User.findById(req.user._id);
 
-		sendToken(res, user, 201, `Welcome back ${user.name}`);
+		sendToken(res, user, 200, `Welcome back ${user.name}`);
 	} catch (error) {
 		res.status(500).json({ success: false, message: error.message });
 	}
 };
 
-export const updateProfile = async (req, res) => {
+export const deleteProfile = async (req, res) => {
 	try {
-		const user = await User.findById(req.user._id);
+		const deletedUser = await User.findByIdAndDelete(req.user._id);
 
-		const { name } = req.body;
-		const avatar = req.files.avatar.tempFilePath;
-
-		if (name) user.name = name;
-		if (avatar) {
-			await cloudinary.v2.uploader.destroy(user.avatar.public_id);
-
-			const mycloud = await cloudinary.v2.uploader.upload(avatar);
-
-			fs.rmSync("./tmp", { recursive: true });
-
-			user.avatar = {
-				public_id: mycloud.public_id,
-				url: mycloud.secure_url,
-			};
-		}
-
-		await user.save();
-
-		res.status(200).json({
-			success: true,
-			message: "Profile Updated successfully",
-		});
-	} catch (error) {
-		res.status(500).json({ success: false, message: error.message });
-	}
-};
-
-export const updatePassword = async (req, res) => {
-	try {
-		const user = await User.findById(req.user._id).select("+password");
-
-		const { oldPassword, newPassword } = req.body;
-
-		if (!oldPassword || !newPassword) {
-			return res
-				.status(400)
-				.json({ success: false, message: "Please enter all fields" });
-		}
-
-		const isMatch = await user.comparePassword(oldPassword);
-
-		if (!isMatch) {
-			return res
-				.status(400)
-				.json({ success: false, message: "Invalid Old Password" });
-		}
-
-		user.password = newPassword;
-
-		await user.save();
-
-		res.status(200).json({
-			success: true,
-			message: "Password Updated successfully",
-		});
-	} catch (error) {
-		res.status(500).json({ success: false, message: error.message });
-	}
-};
-
-export const forgotPassword = async (req, res) => {
-	try {
-		const { email } = req.body;
-
-		const user = await User.findOne({ email });
-
-		if (!user) {
-			return res
-				.status(400)
-				.json({ success: false, message: "Invalid Email" });
-		}
-
-		const otp = Math.floor(Math.random() * 1000000);
-
-		user.resetPasswordOtp = otp;
-		user.resetPasswordOtpExpiry = Date.now() + 10 * 60 * 1000;
-
-		await user.save();
-
-		const message = `Your OTP for reseting the password ${otp}. If you did not request for this, please ignore this email.`;
-
-		await sendMail(email, "Request for Reseting Password", message);
-
-		res.status(200).json({
-			success: true,
-			message: `OTP sent to ${email}`,
-		});
-	} catch (error) {
-		res.status(500).json({ success: false, message: error.message });
-	}
-};
-
-export const resetPassword = async (req, res) => {
-	try {
-		const { otp, newPassword } = req.body;
-
-		const user = await User.findOne({
-			resetPasswordOtp: otp,
-			resetPasswordExpiry: { $gt: Date.now() },
-		});
-
-		if (!user) {
-			return res.status(400).json({
+		if (!deletedUser) {
+			return res.status(404).json({
 				success: false,
-				message: "Otp Invalid or has been Expired",
+				message: "User not found or already deleted",
 			});
 		}
-		user.password = newPassword;
-		user.resetPasswordOtp = null;
-		user.resetPasswordExpiry = null;
+
+		res.status(200).json({
+			success: true,
+			message: "User profile deleted successfully",
+		});
+	} catch (error) {
+		res.status(500).json({ success: false, message: error.message });
+	}
+};
+
+// Address functionality
+
+export const createAddress = async (req, res) => {
+	try {
+		const user = await User.findById(req.user._id);
+		const address = req.body;
+
+		const isDuplicate = user.addresses.some((existingAddress) => {
+			return (
+				existingAddress.houseNumber === address.houseNumber &&
+				existingAddress.street === address.street &&
+				existingAddress.city === address.city &&
+				existingAddress.state === address.state &&
+				existingAddress.postalCode === address.postalCode
+			);
+		});
+
+		if (isDuplicate) {
+			return res.status(400).json({
+				success: false,
+				message: "This address already exists in your profile.",
+			});
+		}
+
+		if (isDuplicate) {
+			return res.status(400).json({
+				success: false,
+				message: "This address already exists in your profile.",
+			});
+		}
+
+		user.addresses.push(address);
 		await user.save();
 
 		res.status(200).json({
 			success: true,
-			message: `Password Changed Successfully`,
+			message: "Address created successfully",
+			user: user,
 		});
 	} catch (error) {
 		res.status(500).json({ success: false, message: error.message });
+	}
+};
+
+export const updateAddress = async (req, res) => {
+	try {
+		const user = await User.findById(req.user._id);
+		const { addressId } = req.params;
+
+		const addressData = req.body;
+
+		const addressToUpdate = user.addresses.find(
+			(address) => address._id.toString() === addressId
+		);
+
+		if (!addressToUpdate) {
+			return res.status(404).json({
+				success: false,
+				message: "Address not found",
+			});
+		}
+
+		Object.assign(addressToUpdate, addressData);
+
+		await user.save();
+
+		res.status(200).json({
+			user: user,
+			success: true,
+			message: "Address updated successfully",
+		});
+	} catch (error) {
+		res.status(500).json({ success: false, message: error.message });
+	}
+};
+
+export const deleteAddress = async (req, res) => {
+	try {
+		const user = await User.findById(req.user._id);
+		const { addressId } = req.params;
+
+		user.addresses = user.addresses.filter(
+			(address) => address._id.toString() !== addressId
+		);
+
+		await user.save();
+
+		res.status(200).json({
+			success: true,
+			message: "Address deleted successfully",
+			user: user,
+		});
+	} catch (error) {
+		res.status(500).json({ success: false, message: error.message });
+	}
+};
+
+export const getAddress = async (req, res) => {
+	try {
+		const user = await User.findById(req.user._id);
+		const addresses = user.addresses;
+
+		res.status(200).json({
+			addresses: addresses,
+		});
+	} catch (error) {
+		res.status(500).json({ success: false, message: error.message });
+	}
+};
+
+// subUser functionality
+
+export const createSubUser = async (req, res) => {
+	try {
+		const user = await User.findById(req.user._id);
+
+		const subUserData = req.body;
+
+		const existingSubUser = user.subUsers.find(
+			(subUser) =>
+				subUser.email === subUserData.email ||
+				subUser.number === subUserData.number
+		);
+
+		if (existingSubUser) {
+			return res.status(400).json({
+				success: false,
+				message:
+					"Sub-user with the same email or number already exists.",
+			});
+		}
+
+		user.subUsers.push(subUserData);
+		await user.save();
+
+		res.status(200).json({
+			success: true,
+			message: "Sub-user created successfully",
+			user: user,
+		});
+	} catch (error) {
+		res.status(500).json({ success: false, message: error.message });
+	}
+};
+
+export const updateSubUser = async (req, res) => {
+	try {
+		const user = await User.findById(req.user._id);
+		const { subuserId } = req.params;
+
+		const updatedSubuserData = req.body;
+
+		const subuserToUpdate = user.subUsers.find(
+			(subuser) => subuser._id.toString() === subuserId
+		);
+
+		if (!subuserToUpdate) {
+			return res.status(404).json({
+				success: false,
+				message: "Sub-user not found",
+			});
+		}
+
+		const existingSubUser = user.subUsers.find(
+			(subuser) =>
+				(subuser.email === updatedSubuserData.email ||
+					subuser.number === updatedSubuserData.number) &&
+				subuser._id.toString() !== subuserId
+		);
+
+		if (existingSubUser) {
+			return res.status(400).json({
+				success: false,
+				message:
+					"A sub-user with the same email or number already exists",
+			});
+		}
+
+		Object.assign(subuserToUpdate, updatedSubuserData);
+
+		await user.save();
+
+		res.status(200).json({
+			user: user,
+			success: true,
+			message: "Sub-user updated successfully",
+		});
+	} catch (error) {
+		res.status(500).json({ success: false, message: error.message });
+	}
+};
+
+// Delete a specific sub-user for the user
+export const deleteSubUser = async (req, res) => {
+	try {
+		const user = await User.findById(req.user._id);
+		const { subuserId } = req.params;
+
+		user.subUsers = user.subUsers.filter(
+			(subuser) => subuser._id.toString() !== subuserId
+		);
+
+		await user.save();
+
+		res.status(200).json({
+			user: user,
+			success: true,
+			message: "Sub-user deleted successfully",
+		});
+	} catch (error) {
+		res.status(500).json({ success: false, message: error.message });
+	}
+};
+
+export const getSubUser = async (req, res) => {
+	try {
+		const user = await User.findById(req.user._id);
+		const subUsers = user.subUsers;
+
+		res.status(200).json({
+			subUsers: subUsers,
+		});
+	} catch (error) {
+		res.status(500).json({ success: false, message: error.message });
+	}
+};
+
+export const getUser = async (req, res) => {
+	try {
+		const userId = req.user._id;
+		const user = await User.findById(userId);
+
+		if (!user) {
+			return res.status(404).json({
+				success: false,
+				message: "User not found",
+			});
+		}
+
+		res.status(200).json({
+			success: true,
+			user: user,
+		});
+	} catch (error) {
+		res.status(500).json({
+			success: false,
+			message: "Failed to fetch user data",
+		});
 	}
 };

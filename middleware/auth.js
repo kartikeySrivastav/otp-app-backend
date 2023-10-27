@@ -23,7 +23,7 @@ export const isAuthenticated = async (req, res, next) => {
 		}
 
 		// Check if the token has expired
-		const currentTimestamp = Date.now(); // Get the current time in milliseconds
+		const currentTimestamp = Date.now();
 		if (decoded.exp * 1000 <= currentTimestamp) {
 			return res.status(401).json({
 				success: false,
