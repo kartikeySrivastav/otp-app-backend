@@ -10,7 +10,9 @@ export const register = async (req, res) => {
 		const { email } = req.body;
 
 		// Check if the email already exists in the database
-		const existingUser = await User.findOne({ email }).maxTimeMS(5000); // Set a 5-second timeout
+		console.log("Before findOne query");
+		const existingUser = await User.findOne({ email }).maxTimeMS(10000);
+		console.log("After findOne query");
 
 		if (existingUser) {
 			return res.status(400).json({
@@ -41,7 +43,16 @@ export const register = async (req, res) => {
 			message: "OTP sent to your email for verification",
 		});
 	} catch (error) {
-		res.status(500).json({ success: false, message: error.message });
+		if (error.name === "MongoTimeoutError") {
+			// Handle timeout error
+			res.status(500).json({
+				success: false,
+				message: "Database operation timed out.",
+			});
+		} else {
+			// Handle other errors
+			res.status(500).json({ success: false, message: error.message });
+		}
 	}
 };
 
