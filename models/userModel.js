@@ -1,8 +1,7 @@
 import mongoose from "mongoose";
 import jwt from "jsonwebtoken";
-import bcrypt from "bcrypt";
 
-const userSchema = new mongoose.Schema({
+const subUserSchema = new mongoose.Schema({
 	name: {
 		type: String,
 		required: true,
@@ -10,58 +9,72 @@ const userSchema = new mongoose.Schema({
 	email: {
 		type: String,
 		required: true,
-		unique: true,
-		trim: true,
 		lowercase: true,
 	},
-	password: {
+	number: {
 		type: String,
 		required: true,
-		minlength: [8, "Password must be at least 8 characters long"],
-		select: false,
 	},
-	avatar: {
-		public_id: String,
-		url: String,
+});
+
+const addressSchema = new mongoose.Schema({
+	houseNumber: {
+		type: String,
 	},
-	createdAt: {
-		type: Date,
-		default: Date.now,
+	street: {
+		type: String,
 	},
-	tasks: [
-		{
-			title: "String",
-			description: "String",
-			completed: Boolean,
-			createdAt: Date,
+	city: {
+		type: String,
+	},
+	state: {
+		type: String,
+	},
+	postalCode: {
+		type: String,
+	},
+});
+
+const userSchema = new mongoose.Schema(
+	{
+		name: {
+			type: String,
 		},
-	],
-	verified: {
-		type: Boolean,
-		default: false,
+		email: {
+			type: String,
+			unique: true,
+			lowercase: true,
+		},
+		number: {
+			type: Number,
+		},
+		avatar: {
+			public_id: String,
+			url: String,
+		},
+		addresses: [addressSchema],
+		subUsers: [subUserSchema],
+		verified: {
+			type: Boolean,
+			default: false,
+		},
+		otp: Number,
+		otp_expiry: {
+			type: Date,
+			default: Date.now() + 5 * 60 * 1000,
+		},
 	},
-	otp: Number,
-	otp_expiry: Date,
-	resetPasswordOtp: Number,
-	resetPasswordOtpExpiry: Date,
-});
-
-userSchema.pre("save", async function (next) {
-	if (!this.isModified("password")) return next();
-
-	const salt = await bcrypt.genSalt(10);
-	this.password = await bcrypt.hash(this.password, salt);
-});
+	{
+		timestamps: true,
+	}
+);
 
 userSchema.methods.getJWTToken = function () {
+	const cookieExpirationTime = 2 * 24 * 60 * 60 * 1000;
 	const token = jwt.sign({ _id: this._id }, process.env.JWT_SECRET_KEY, {
-		expiresIn: "10d",
+		expiresIn: cookieExpirationTime,
 	});
 	return token;
-};
-
-userSchema.methods.comparePassword = async function (password) {
-	return await bcrypt.compare(password, this.password);
 };
 
 userSchema.index({ otp_expiry: 1 }, { expireAfterSeconds: 0 });
